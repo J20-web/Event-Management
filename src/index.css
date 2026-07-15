@@ -7,10 +7,22 @@
   
   --color-pet-cream: #FDFBF7;
   --color-pet-clay: #1F1E1C;
-  --color-pet-accent: #059669; /* Emerald-600 */
-  --color-pet-accent-hover: #047857; /* Emerald-700 */
+  --color-pet-accent: #108a54; /* Soft Emerald-600 */
+  --color-pet-accent-hover: #0d6940; /* Soft Emerald-700 */
   --color-pet-sage: #0F766E; /* Teal-700 */
   --color-pet-sage-light: #F0FDFA; /* Teal-50 */
+
+  /* Overriding Tailwind's standard emerald palette with a softer, premium sage-emerald */
+  --color-emerald-50: #f2faf6;
+  --color-emerald-100: #e2f4eb;
+  --color-emerald-200: #c4ebd8;
+  --color-emerald-300: #9adbb7;
+  --color-emerald-400: #68c593;
+  --color-emerald-500: #42ab77;
+  --color-emerald-600: #108a54;
+  --color-emerald-700: #0d6940;
+  --color-emerald-800: #0c5434;
+  --color-emerald-900: #0b452c;
   
   --animate-fade-in: fade-in 0.3s ease-out;
   --animate-slide-up: slide-up 0.4s cubic-bezier(0.16, 1, 0.3, 1);

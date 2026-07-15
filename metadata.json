@@ -1,0 +1,8 @@
+{
+  "name": "Pet Care Events",
+  "description": "A premium-quality, full-stack event management web application for pet care education, training, and workshops.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

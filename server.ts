@@ -295,7 +295,13 @@ async function getUserFromRequest(req: any) {
   }
   const token = authHeader.split(" ")[1];
 
-  const supabaseUrl = process.env.VITE_SUPABASE_URL;
+  const rawUrl = process.env.VITE_SUPABASE_URL || "";
+  const cleanUrl = rawUrl.includes("/rest/v1/")
+    ? rawUrl.split("/rest/v1/")[0]
+    : rawUrl.includes("/rest/v1")
+    ? rawUrl.split("/rest/v1")[0]
+    : rawUrl;
+  const supabaseUrl = cleanUrl.endsWith("/") ? cleanUrl.slice(0, -1) : cleanUrl;
   const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
 
   if (supabaseUrl && supabaseAnonKey && supabaseUrl !== "MY_SUPABASE_URL") {

@@ -4,6 +4,7 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import { createClient } from "@supabase/supabase-js";
 import { validateEmail, validateLength, validateCapacity, validateUrl, validateDate, sanitizeInput } from "./src/utils/validation";
 
 // Load environment variables
@@ -256,8 +257,253 @@ function readDatabase() {
 function writeDatabase(data: any) {
   try {
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf-8");
+    // Trigger background async sync to Supabase
+    syncToSupabase(data);
   } catch (error) {
     console.error("Error writing to database:", error);
+  }
+}
+
+let isSyncing = false;
+
+async function syncToSupabase(data: any) {
+  if (isSyncing) return;
+  const rawUrl = process.env.VITE_SUPABASE_URL || "";
+  const cleanUrl = rawUrl.includes("/rest/v1/")
+    ? rawUrl.split("/rest/v1/")[0]
+    : rawUrl.includes("/rest/v1")
+    ? rawUrl.split("/rest/v1")[0]
+    : rawUrl;
+  const supabaseUrl = cleanUrl.endsWith("/") ? cleanUrl.slice(0, -1) : cleanUrl;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl || !serviceRoleKey || supabaseUrl === "MY_SUPABASE_URL") {
+    return;
+  }
+
+  isSyncing = true;
+  try {
+    const supabaseClient = createClient(supabaseUrl, serviceRoleKey);
+    console.log("[Supabase Sync] Commencing database push...");
+
+    // 1. Sync to monolithic table 'app_state'
+    const { error: syncError } = await supabaseClient
+      .from("app_state")
+      .upsert({ key: "db_json", value: data });
+
+    if (syncError) {
+      console.log("[Supabase Sync] Note: 'app_state' table sync returned:", syncError.message);
+    } else {
+      console.log("✅ [Supabase Sync] Monolithic state synchronized to 'app_state' table!");
+    }
+
+    // 2. Try to sync to individual tables
+    const eventsToSync = data.map((e: any) => {
+      const { registrations, comments, ...rest } = e;
+      return rest;
+    });
+
+    const registrationsToSync = data.flatMap((e: any) => 
+      (e.registrations || []).map((r: any) => ({
+        id: r.id,
+        event_id: e.id,
+        name: r.name,
+        email: r.email,
+        pet_name: r.petName || r.pet_name,
+        pet_type: r.petType || r.pet_type,
+        pet_age: r.petAge || r.pet_age,
+        experience_level: r.experienceLevel || r.experience_level,
+        concerns: r.concerns,
+        registered_at: r.registeredAt || r.registered_at,
+        checked_in: r.checkedIn || r.checked_in || false
+      }))
+    );
+
+    const commentsToSync = data.flatMap((e: any) => 
+      (e.comments || []).map((c: any) => ({
+        id: c.id,
+        event_id: e.id,
+        user_name: c.name || c.userName || c.user_name,
+        user_email: c.email || c.userEmail || c.user_email,
+        content: c.text || c.content,
+        created_at: c.timestamp || c.createdAt || c.created_at
+      }))
+    );
+
+    // Sync to events table
+    const { error: eErr } = await supabaseClient.from("events").upsert(eventsToSync);
+    if (!eErr) {
+      console.log(`✅ [Supabase Sync] Synchronized ${eventsToSync.length} events.`);
+    }
+
+    // Sync to registrations table
+    if (registrationsToSync.length > 0) {
+      const { error: rErr } = await supabaseClient.from("registrations").upsert(registrationsToSync);
+      if (!rErr) {
+        console.log(`✅ [Supabase Sync] Synchronized ${registrationsToSync.length} registrations.`);
+      }
+    }
+
+    // Sync to comments table
+    if (commentsToSync.length > 0) {
+      const { error: cErr } = await supabaseClient.from("comments").upsert(commentsToSync);
+      if (!cErr) {
+        console.log(`✅ [Supabase Sync] Synchronized ${commentsToSync.length} comments.`);
+      }
+    }
+
+  } catch (err: any) {
+    console.error("[Supabase Sync] Background synchronization error:", err.message || err);
+  } finally {
+    isSyncing = false;
+  }
+}
+
+async function initSupabaseSync() {
+  const rawUrl = process.env.VITE_SUPABASE_URL || "";
+  const cleanUrl = rawUrl.includes("/rest/v1/")
+    ? rawUrl.split("/rest/v1/")[0]
+    : rawUrl.includes("/rest/v1")
+    ? rawUrl.split("/rest/v1")[0]
+    : rawUrl;
+  const supabaseUrl = cleanUrl.endsWith("/") ? cleanUrl.slice(0, -1) : cleanUrl;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl || !serviceRoleKey || supabaseUrl === "MY_SUPABASE_URL") {
+    console.log("[Supabase Sync] Not configured. Operating with local data cache.");
+    return;
+  }
+
+  try {
+    const supabaseClient = createClient(supabaseUrl, serviceRoleKey);
+    console.log("[Supabase Sync] Contacting Supabase to retrieve database state...");
+
+    // 1. Try to read from 'app_state' table
+    const { data: stateData, error: stateError } = await supabaseClient
+      .from("app_state")
+      .select("value")
+      .eq("key", "db_json")
+      .single();
+
+    if (!stateError && stateData && stateData.value) {
+      console.log("✅ [Supabase Sync] Downloaded master database backup from 'app_state'. Updating local cache...");
+      fs.writeFileSync(DB_FILE, JSON.stringify(stateData.value, null, 2), "utf-8");
+      return;
+    }
+
+    // 2. Fallback to individual tables
+    const { data: events, error: eventsError } = await supabaseClient.from("events").select("*");
+    if (!eventsError && events && events.length > 0) {
+      console.log(`[Supabase Sync] Found ${events.length} events in 'events' table. Rebuilding local cache...`);
+      const { data: regs } = await supabaseClient.from("registrations").select("*");
+      const { data: comments } = await supabaseClient.from("comments").select("*");
+
+      const assembledEvents = events.map((e: any) => {
+        const eRegs = (regs || [])
+          .filter((r: any) => r.event_id === e.id)
+          .map((r: any) => ({
+            id: r.id,
+            name: r.name,
+            email: r.email,
+            petName: r.pet_name,
+            petType: r.pet_type,
+            petAge: r.pet_age,
+            experienceLevel: r.experience_level,
+            concerns: r.concerns,
+            registeredAt: r.registered_at,
+            checkedIn: r.checked_in
+          }));
+
+        const eComments = (comments || [])
+          .filter((c: any) => c.event_id === e.id)
+          .map((c: any) => ({
+            id: c.id,
+            name: c.user_name,
+            role: "Attendee", // default
+            text: c.content,
+            timestamp: c.created_at
+          }));
+
+        return {
+          ...e,
+          registrations: eRegs,
+          comments: eComments
+        };
+      });
+
+      fs.writeFileSync(DB_FILE, JSON.stringify(assembledEvents, null, 2), "utf-8");
+      console.log("✅ [Supabase Sync] Rebuilt local database cache from relational tables!");
+      return;
+    }
+
+    // 3. If everything is blank on Supabase, initialize it by uploading local db.json
+    console.log("[Supabase Sync] Supabase contains no matching tables or data. Bootstrapping initial database state from db.json...");
+    if (fs.existsSync(DB_FILE)) {
+      const data = JSON.parse(fs.readFileSync(DB_FILE, "utf-8"));
+      await syncToSupabase(data);
+    }
+
+    // Print out the SQL schema to console so the user has easy access to it
+    console.log(`
+[Supabase Sync Tip] If you want to use standard relational tables on Supabase, run this SQL in your Supabase SQL Editor:
+
+-- 1. Create app_state table (recommended)
+CREATE TABLE IF NOT EXISTS app_state (
+  key TEXT PRIMARY KEY,
+  value JSONB
+);
+
+-- 2. Create events table
+CREATE TABLE IF NOT EXISTS events (
+  id TEXT PRIMARY KEY,
+  title TEXT,
+  category TEXT,
+  "petType" TEXT,
+  date TEXT,
+  time TEXT,
+  duration TEXT,
+  "locationType" TEXT,
+  location TEXT,
+  "hostName" TEXT,
+  "hostRole" TEXT,
+  "hostBio" TEXT,
+  description TEXT,
+  details TEXT,
+  image TEXT,
+  capacity INTEGER,
+  tags JSONB,
+  agenda JSONB,
+  "aiPetTips" JSONB
+);
+
+-- 3. Create registrations table
+CREATE TABLE IF NOT EXISTS registrations (
+  id TEXT PRIMARY KEY,
+  event_id TEXT REFERENCES events(id) ON DELETE CASCADE,
+  name TEXT,
+  email TEXT,
+  pet_name TEXT,
+  pet_type TEXT,
+  pet_age TEXT,
+  experience_level TEXT,
+  concerns TEXT,
+  registered_at TEXT,
+  checked_in BOOLEAN DEFAULT FALSE
+);
+
+-- 4. Create comments table
+CREATE TABLE IF NOT EXISTS comments (
+  id TEXT PRIMARY KEY,
+  event_id TEXT REFERENCES events(id) ON DELETE CASCADE,
+  user_name TEXT,
+  user_email TEXT,
+  content TEXT,
+  created_at TEXT
+);
+`);
+
+  } catch (err: any) {
+    console.error("[Supabase Sync] Initialization warning:", err.message || err);
   }
 }
 
@@ -306,7 +552,6 @@ async function getUserFromRequest(req: any) {
 
   if (supabaseUrl && supabaseAnonKey && supabaseUrl !== "MY_SUPABASE_URL") {
     try {
-      const { createClient } = require("@supabase/supabase-js");
       const client = createClient(supabaseUrl, supabaseAnonKey);
       const { data: { user }, error } = await client.auth.getUser(token);
       if (user && !error) {
@@ -919,6 +1164,9 @@ const startServer = async () => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
+
+  // Initialize Supabase Database Synchronization
+  await initSupabaseSync();
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`[Pet Care Events Backend] Server running on http://0.0.0.0:${PORT}`);
